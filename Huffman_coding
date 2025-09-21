@@ -1,0 +1,257 @@
+/**
+ * C++ File Compression Utility using Huffman Coding
+ *
+ * This implementation directly reflects the features described in the resume points:
+ * - A command-line tool for lossless data compression.
+ * - Uses a priority_queue (min-heap) to build an optimal Huffman Tree.
+ * - Defines a custom binary file format with a header for the frequency map.
+ * - Performs robust binary file I/O operations.
+ * - Manages bitstream manipulation and padding.
+ * - Utilizes core data structures like maps, priority queues, and trees.
+ */
+
+#include <iostream>
+#include <fstream>
+#include <string>
+#include <vector>
+#include <queue>
+#include <map>
+#include <bitset>
+
+// Represents a node in the Huffman Tree.
+// This is a core component of our custom data structure.
+struct HuffmanNode {
+    char data;
+    unsigned frequency;
+    HuffmanNode *left, *right;
+
+    HuffmanNode(char data, unsigned frequency) : data(data), frequency(frequency), left(nullptr), right(nullptr) {}
+};
+
+// A custom comparator for the priority queue to create a min-heap.
+// It ensures that nodes with lower frequencies have higher priority.
+struct CompareNodes {
+    bool operator()(HuffmanNode* l, HuffmanNode* r) {
+        return l->frequency > r->frequency;
+    }
+};
+
+// Global map to store the generated Huffman codes for each character.
+std::map<char, std::string> huffmanCodes;
+
+/**
+ * @brief Recursively traverses the Huffman Tree to generate prefix codes.
+ * @param root The root of the Huffman Tree.
+ * @param currentCode The binary string representing the path from the root.
+ */
+void generateCodes(HuffmanNode* root, const std::string& currentCode) {
+    if (!root) {
+        return;
+    }
+    // A leaf node contains a character to be encoded.
+    if (!root->left && !root->right) {
+        huffmanCodes[root->data] = currentCode;
+    }
+    generateCodes(root->left, currentCode + "0");
+    generateCodes(root->right, currentCode + "1");
+}
+
+/**
+ * @brief Builds the Huffman Tree using a priority queue.
+ * This function showcases the "Engineered an efficient prefix-code generation system" point.
+ * @param frequencyMap A map of characters to their frequencies.
+ * @return The root of the completed Huffman Tree.
+ */
+HuffmanNode* buildHuffmanTree(const std::map<char, int>& frequencyMap) {
+    std::priority_queue<HuffmanNode*, std::vector<HuffmanNode*>, CompareNodes> minHeap;
+
+    // Create a leaf node for each character and add it to the min-heap.
+    for (auto const& [character, freq] : frequencyMap) {
+        minHeap.push(new HuffmanNode(character, freq));
+    }
+    
+    // The tree is built by merging the two nodes with the lowest frequencies
+    // until only one node (the root) remains.
+    while (minHeap.size() > 1) {
+        HuffmanNode* left = minHeap.top();
+        minHeap.pop();
+        HuffmanNode* right = minHeap.top();
+        minHeap.pop();
+
+        // Create a new internal node. '$' is a placeholder for non-leaf nodes.
+        HuffmanNode* internalNode = new HuffmanNode('$', left->frequency + right->frequency);
+        internalNode->left = left;
+        internalNode->right = right;
+        minHeap.push(internalNode);
+    }
+    
+    // The single remaining node is the root of the tree.
+    return minHeap.top();
+}
+
+/**
+ * @brief Compresses an input file into an output file.
+ * This function covers file I/O, header design, and bit manipulation points.
+ * @param inputPath Path to the file to compress.
+ * @param outputPath Path to write the compressed file.
+ */
+void compressFile(const std::string& inputPath, const std::string& outputPath) {
+    // 1. Read the input file and build character frequency map.
+    std::ifstream inputFile(inputPath, std::ios::binary);
+    if (!inputFile) {
+        std::cerr << "Error: Cannot open input file " << inputPath << std::endl;
+        return;
+    }
+    std::map<char, int> frequencyMap;
+    char character;
+    while (inputFile.get(character)) {
+        frequencyMap[character]++;
+    }
+    inputFile.close();
+
+    // 2. Build the Huffman tree and generate codes.
+    HuffmanNode* root = buildHuffmanTree(frequencyMap);
+    generateCodes(root, "");
+
+    // 3. Write the custom header and the encoded data to the output file.
+    std::ofstream outputFile(outputPath, std::ios::binary);
+    if (!outputFile) {
+        std::cerr << "Error: Cannot open output file " << outputPath << std::endl;
+        return;
+    }
+
+    // Header Part 1: Size of the frequency map.
+    int mapSize = frequencyMap.size();
+    outputFile.write(reinterpret_cast<const char*>(&mapSize), sizeof(mapSize));
+    
+    // Header Part 2: The frequency map itself.
+    for (const auto& pair : frequencyMap) {
+        outputFile.write(reinterpret_cast<const char*>(&pair.first), sizeof(pair.first));
+        outputFile.write(reinterpret_cast<const char*>(&pair.second), sizeof(pair.second));
+    }
+
+    // 4. Re-read the input file and write the encoded bitstream.
+    inputFile.open(inputPath, std::ios::binary);
+    std::string encodedData;
+    char bitBuffer = 0;
+    int bitCount = 0;
+
+    while (inputFile.get(character)) {
+        std::string code = huffmanCodes[character];
+        for (char bit : code) {
+            bitBuffer = (bitBuffer << 1) | (bit - '0');
+            bitCount++;
+            if (bitCount == 8) {
+                outputFile.write(&bitBuffer, 1);
+                bitBuffer = 0;
+                bitCount = 0;
+            }
+        }
+    }
+
+    // 5. Handle padding for the last byte.
+    if (bitCount > 0) {
+        bitBuffer <<= (8 - bitCount);
+        outputFile.write(&bitBuffer, 1);
+    }
+    
+    // We must also store how many bits in the last byte are padding.
+    // This is a subtle but critical part of the file format.
+    // A simple approach is to add padding info to the header, but for simplicity here,
+    // the decoder can infer it from the total character count. For a more robust system,
+    // you'd write total character count or padding count to the header.
+
+    inputFile.close();
+    outputFile.close();
+
+    std::cout << "File compressed successfully." << std::endl;
+}
+
+/**
+ * @brief Decompresses a file.
+ * @param inputPath Path to the compressed file.
+ * @param outputPath Path to write the decompressed file.
+ */
+void decompressFile(const std::string& inputPath, const std::string& outputPath) {
+    std::ifstream inputFile(inputPath, std::ios::binary);
+    if (!inputFile) {
+        std::cerr << "Error: Cannot open input file " << inputPath << std::endl;
+        return;
+    }
+    
+    // 1. Read the custom header to rebuild the frequency map.
+    std::map<char, int> frequencyMap;
+    int mapSize;
+    inputFile.read(reinterpret_cast<char*>(&mapSize), sizeof(mapSize));
+
+    long long totalFreq = 0;
+    for (int i = 0; i < mapSize; ++i) {
+        char character;
+        int freq;
+        inputFile.read(reinterpret_cast<char*>(&character), sizeof(character));
+        inputFile.read(reinterpret_cast<char*>(&freq), sizeof(freq));
+        frequencyMap[character] = freq;
+        totalFreq += freq;
+    }
+
+    // 2. Rebuild the Huffman tree.
+    HuffmanNode* root = buildHuffmanTree(frequencyMap);
+
+    // 3. Read the encoded data and decode it by traversing the tree.
+    std::ofstream outputFile(outputPath, std::ios::binary);
+    if (!outputFile) {
+        std::cerr << "Error: Cannot open output file " << outputPath << std::endl;
+        return;
+    }
+    
+    HuffmanNode* currentNode = root;
+    char bitBuffer;
+    long long decodedCount = 0;
+
+    while (inputFile.get(bitBuffer)) {
+        for (int i = 7; i >= 0 && decodedCount < totalFreq; --i) {
+            char bit = (bitBuffer >> i) & 1;
+            if (bit == 0) {
+                currentNode = currentNode->left;
+            } else {
+                currentNode = currentNode->right;
+            }
+
+            if (!currentNode->left && !currentNode->right) {
+                outputFile.put(currentNode->data);
+                decodedCount++;
+                currentNode = root;
+            }
+        }
+    }
+
+    inputFile.close();
+    outputFile.close();
+
+    std::cout << "File decompressed successfully." << std::endl;
+}
+
+/**
+ * @brief Main function to drive the command-line interface.
+ */
+int main(int argc, char* argv[]) {
+    if (argc != 4) {
+        std::cerr << "Usage: " << argv[0] << " <-c|-d> <input_file> <output_file>" << std::endl;
+        return 1;
+    }
+
+    std::string mode = argv[1];
+    std::string inputPath = argv[2];
+    std::string outputPath = argv[3];
+
+    if (mode == "-c") {
+        compressFile(inputPath, outputPath);
+    } else if (mode == "-d") {
+        decompressFile(inputPath, outputPath);
+    } else {
+        std::cerr << "Invalid mode. Use '-c' for compress or '-d' for decompress." << std::endl;
+        return 1;
+    }
+
+    return 0;
+}
